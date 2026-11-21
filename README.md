@@ -43,5 +43,6 @@ DATA_DIR=dev OUTPUT_DIR=out ./target/release/shopping-sessions
 python3 scripts/compare.py out dev-answer
 ```
 
-Timing on one machine (8 threads): ~11 s for 20M events, ~35 s projected for
-the 60M final set.
+Timing on one machine (8 threads): ~0.4 s for the 1M dev set, ~9-10 s for
+20M events; the 60M final set is projected around 30 s, comfortably under
+the 3-minute cap.
