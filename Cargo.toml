@@ -1,11 +1,11 @@
 [package]
 name = "shopping-sessions"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 rayon = "1.10"
-dashmap = "6"
+memchr = "2"
 parquet = { version = "54", default-features = false, features = ["snap"] }
 
 [profile.release]
