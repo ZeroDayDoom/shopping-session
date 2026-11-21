@@ -115,21 +115,21 @@ impl UserTable {
         }
     }
 
-    /// Insert h if absent. Returns the gid (== slot index).
-    pub fn get_or_insert(&self, h: u64) -> u32 {
+    /// Insert h if absent. Returns (gid, is_new); gid == slot index.
+    pub fn get_or_insert(&self, h: u64) -> (u32, bool) {
         let mut i = (h as usize) & self.mask;
         loop {
             let s = &self.keys[i];
             let k = s.load(Ordering::Relaxed);
             if k == h {
-                return i as u32;
+                return (i as u32, false);
             }
             if k == 0 {
                 match s.compare_exchange(0, h, Ordering::Relaxed, Ordering::Relaxed) {
-                    Ok(_) => return i as u32,
+                    Ok(_) => return (i as u32, true),
                     Err(cur) => {
                         if cur == h {
-                            return i as u32;
+                            return (i as u32, false);
                         }
                         i = (i + 1) & self.mask;
                     }
@@ -161,7 +161,7 @@ pub fn parse_event_chunk(
     hi: usize,
     users: &UserTable,
     arena: &mut Vec<u8>,
-    names: &mut PreMap<u64, (u32, u32, u32)>,
+    name_rec: &mut Vec<(u32, u32, u32)>,
 ) -> (Vec<[u64; 2]>, Vec<Vec<ERec>>) {
     let est_rows = (hi - lo) / 80 + 64;
     let mut side: Vec<[u64; 2]> = Vec::new();
@@ -204,14 +204,11 @@ pub fn parse_event_chunk(
             _ => 0,
         };
         let uid_h = hash64(f[1]);
-        let uid = users.get_or_insert(uid_h);
-        match names.entry(uid_h) {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                let off = arena.len() as u32;
-                arena.extend_from_slice(f[1]);
-                v.insert((uid, off, f[1].len() as u32));
-            }
-            _ => {}
+        let (uid, is_new) = users.get_or_insert(uid_h);
+        if is_new {
+            let off = arena.len() as u32;
+            arena.extend_from_slice(f[1]);
+            name_rec.push((uid, off, f[1].len() as u32));
         }
         let mut flags = typ;
         let mut pidx = u32::MAX;
@@ -250,7 +247,7 @@ pub fn parse_click_chunk(
     known_campaigns: &PreMap<[u64; 2], u32>,
     users: &UserTable,
     arena: &mut Vec<u8>,
-    names: &mut PreMap<u64, (u32, u32, u32)>,
+    name_rec: &mut Vec<(u32, u32, u32)>,
 ) -> (Vec<u8>, Vec<Vec<CRec>>) {
     let est_rows = (hi - lo) / 45 + 64;
     let mut arena: Vec<u8> = Vec::with_capacity((hi - lo) / 4);
@@ -283,14 +280,11 @@ pub fn parse_click_chunk(
         }
         let ts = parse_ts(f[3]);
         let uid_h = hash64(f[1]);
-        let uid = users.get_or_insert(uid_h);
-        match names.entry(uid_h) {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                let off = arena.len() as u32;
-                arena.extend_from_slice(f[1]);
-                v.insert((uid, off, f[1].len() as u32));
-            }
-            _ => {}
+        let (uid, is_new) = users.get_or_insert(uid_h);
+        if is_new {
+            let off = arena.len() as u32;
+            arena.extend_from_slice(f[1]);
+            name_rec.push((uid, off, f[1].len() as u32));
         }
         let camp = known_campaigns
             .get(&hash128(f[2], 0xC3))
@@ -318,7 +312,7 @@ pub fn parse_links(
     data: &[u8],
     users: &UserTable,
     arena: &mut Vec<u8>,
-    names: &mut PreMap<u64, (u32, u32, u32)>,
+    name_rec: &mut Vec<(u32, u32, u32)>,
 ) -> Vec<(u32, u32)> {
     let mut pairs = Vec::new();
     let mut first = true;
@@ -336,17 +330,17 @@ pub fn parse_links(
         }
         let ha = hash64(f[0]);
         let hb = hash64(f[1]);
-        let a = users.get_or_insert(ha);
-        let b = users.get_or_insert(hb);
-        if let std::collections::hash_map::Entry::Vacant(v) = names.entry(ha) {
+        let (a, new_a) = users.get_or_insert(ha);
+        let (b, new_b) = users.get_or_insert(hb);
+        if new_a {
             let off = arena.len() as u32;
             arena.extend_from_slice(f[0]);
-            v.insert((a, off, f[0].len() as u32));
+            name_rec.push((a, off, f[0].len() as u32));
         }
-        if let std::collections::hash_map::Entry::Vacant(v) = names.entry(hb) {
+        if new_b {
             let off = arena.len() as u32;
             arena.extend_from_slice(f[1]);
-            v.insert((b, off, f[1].len() as u32));
+            name_rec.push((b, off, f[1].len() as u32));
         }
         pairs.push((a, b));
     }

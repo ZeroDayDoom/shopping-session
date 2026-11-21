@@ -190,18 +190,18 @@ fn main() {
 
     // ---- links (small; sequential)
     let mut link_arena: Vec<u8> = Vec::new();
-    let mut link_names: PreMap<u64, (u32, u32, u32)> = csv::premap(1024);
+    let mut link_name_rec: Vec<(u32, u32, u32)> = Vec::new();
     let mut link_pairs: Vec<(u32, u32)> = Vec::new();
     for p in csv_files(&data_dir.join("links")) {
         if let Ok(text) = fs::read(&p) {
-            link_pairs.extend(parse_links(&text, &users, &mut link_arena, &mut link_names));
+            link_pairs.extend(parse_links(&text, &users, &mut link_arena, &mut link_name_rec));
         }
     }
     log!("links parsed");
 
     // ---- event chunks (parallel parse into hash buckets)
     let esrc = build_src(&data_dir.join("events"));
-    let parsed: Vec<(Vec<[u64; 2]>, Vec<u8>, PreMap<u64, (u32, u32, u32)>, Vec<Vec<ERec>>)> =
+    let parsed: Vec<(Vec<[u64; 2]>, Vec<u8>, Vec<(u32, u32, u32)>, Vec<Vec<ERec>>)> =
         esrc
             .chunks
             .par_iter()
@@ -209,16 +209,16 @@ fn main() {
             .map(|(seq, &(fi, lo, hi))| {
                 let data: &[u8] = &esrc.bufs[fi as usize];
                 let mut arena = Vec::new();
-                let mut names = csv::premap(4096);
+                let mut name_rec = Vec::new();
                 let (side, b) =
-                    parse_event_chunk(data, lo, hi, &users, &mut arena, &mut names);
-                (side, arena, names, b)
+                    parse_event_chunk(data, lo, hi, &users, &mut arena, &mut name_rec);
+                (side, arena, name_rec, b)
             })
             .collect();
     let mut esides: Vec<Vec<[u64; 2]>> = Vec::with_capacity(parsed.len());
     let mut ebm: Vec<Vec<(usize, Vec<ERec>)>> = vec![Vec::new(); NB];
     let mut chunk_arenas: Vec<Vec<u8>> = Vec::with_capacity(parsed.len() + 1);
-    let mut chunk_names: Vec<PreMap<u64, (u32, u32, u32)>> =
+    let mut chunk_names: Vec<Vec<(u32, u32, u32)>> =
         Vec::with_capacity(parsed.len() + 1);
     for (seq, (side, arena, nm, per_bucket)) in parsed.into_iter().enumerate() {
         esides.push(side);
@@ -234,17 +234,17 @@ fn main() {
 
     // ---- click chunks
     let csrc = build_src(&data_dir.join("clicks"));
-    let cparsed: Vec<(Vec<u8>, PreMap<u64, (u32, u32, u32)>, Vec<Vec<CRec>>)> = csrc
+    let cparsed: Vec<(Vec<u8>, Vec<(u32, u32, u32)>, Vec<Vec<CRec>>)> = csrc
         .chunks
         .par_iter()
         .enumerate()
         .map(|(seq, &(fi, lo, hi))| {
             let data: &[u8] = &csrc.bufs[fi as usize];
             let mut arena = Vec::new();
-            let mut names = csv::premap(4096);
+            let mut name_rec = Vec::new();
             let (a, b) =
-                parse_click_chunk(data, lo, hi, seq as u32, &known_campaigns, &users, &mut arena, &mut names);
-            (a, names, b)
+                parse_click_chunk(data, lo, hi, seq as u32, &known_campaigns, &users, &mut arena, &mut name_rec);
+            (a, name_rec, b)
         })
         .collect();
     let mut carenas: Vec<Vec<u8>> = Vec::with_capacity(cparsed.len());
@@ -261,7 +261,7 @@ fn main() {
     let n_event_chunks = esides.len();
     let n_click_chunks = carenas.len();
     chunk_arenas.push(link_arena);
-    chunk_names.push(link_names);
+    chunk_names.push(link_name_rec);
     let n_link_idx = chunk_names.len() - 1; // link entry index in the lists
     log!("clicks parsed");
 
@@ -270,10 +270,10 @@ fn main() {
     let mut name_slots: Vec<Option<Box<[u8]>>> = (0..n_ids).map(|_| None).collect();
     fn fill_names(
         slots: &mut Vec<Option<Box<[u8]>>>,
-        nm: &PreMap<u64, (u32, u32, u32)>,
+        rec: &[(u32, u32, u32)],
         arena: &[u8],
     ) {
-        for (_h, (gid, off, len)) in nm {
+        for (gid, off, len) in rec {
             let gid = *gid as usize;
             if slots[gid].is_none() {
                 slots[gid] = Some(Box::from(&arena[*off as usize..(*off + *len) as usize]));
