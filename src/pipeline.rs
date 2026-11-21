@@ -1,11 +1,12 @@
 // Core pipeline: records, chunk parsing into hash buckets, bucket-local dedup
 // with open-addressing maps, sessionization and attribution passes.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use memchr::memchr;
 use rayon::prelude::*;
+
+use std::collections::HashMap;
 
 use crate::csv::{find, hash128, parse_price, parse_ts, PreMap, INVALID_TS};
 
@@ -160,7 +161,7 @@ pub fn parse_event_chunk(
     hi: usize,
     users: &UserTable,
     arena: &mut Vec<u8>,
-    names: &mut HashMap<u64, (u32, u32, u32)>,
+    names: &mut PreMap<u64, (u32, u32, u32)>,
 ) -> (Vec<[u64; 2]>, Vec<Vec<ERec>>) {
     let est_rows = (hi - lo) / 80 + 64;
     let mut side: Vec<[u64; 2]> = Vec::new();
@@ -249,7 +250,7 @@ pub fn parse_click_chunk(
     known_campaigns: &PreMap<[u64; 2], u32>,
     users: &UserTable,
     arena: &mut Vec<u8>,
-    names: &mut HashMap<u64, (u32, u32, u32)>,
+    names: &mut PreMap<u64, (u32, u32, u32)>,
 ) -> (Vec<u8>, Vec<Vec<CRec>>) {
     let est_rows = (hi - lo) / 45 + 64;
     let mut arena: Vec<u8> = Vec::with_capacity((hi - lo) / 4);
@@ -317,7 +318,7 @@ pub fn parse_links(
     data: &[u8],
     users: &UserTable,
     arena: &mut Vec<u8>,
-    names: &mut HashMap<u64, (u32, u32, u32)>,
+    names: &mut PreMap<u64, (u32, u32, u32)>,
 ) -> Vec<(u32, u32)> {
     let mut pairs = Vec::new();
     let mut first = true;
@@ -620,7 +621,7 @@ pub fn sessionize_group(
         sessions: i64,
         events: i64,
         revenue: i64,
-        cats: HashMap<u32, i64>,
+        cats: PreMap<u32, i64>,
         has_p: bool,
     }
     let mut sessions: Vec<Sess> = Vec::new();
@@ -699,7 +700,7 @@ pub fn sessionize_group(
                     sessions: 0,
                     events: 0,
                     revenue: 0,
-                    cats: HashMap::new(),
+                    cats: crate::csv::premap(16),
                     has_p: false,
                 });
             }

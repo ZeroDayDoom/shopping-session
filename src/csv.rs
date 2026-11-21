@@ -7,17 +7,31 @@ pub fn mix(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// 128-bit key from a byte string: two FNV-1a streams, finalized with splitmix.
-/// Inputs are generated (non-adversarial); exact byte identity is what matters.
+/// 128-bit key from a byte string: two independent mix streams over 8-byte
+/// blocks, length-mixed. Inputs are generated (non-adversarial); exact byte
+/// identity is what matters.
 #[inline]
 pub fn hash128(b: &[u8], seed: u64) -> [u64; 2] {
-    let mut h1 = 0xcbf2_9ce4_8422_2325u64 ^ seed;
-    let mut h2 = 0x8422_2325_cbf2_9ce4u64 ^ mix(seed | 1);
-    for &c in b {
-        h1 = (h1 ^ c as u64).wrapping_mul(0x1_0000_0001_b3);
-        h2 = (h2 ^ c as u64).wrapping_mul(0x1_0000_0001_b3);
+    let mut h1 = seed ^ 0xcbf2_9ce4_8422_2325;
+    let mut h2 = mix(seed | 1) ^ 0x8422_2325_cbf2_9ce4;
+    let mut chunks = b.chunks_exact(8);
+    for c in &mut chunks {
+        let v = u64::from_le_bytes(c.try_into().unwrap());
+        h1 = mix(h1 ^ v);
+        h2 = mix(h2 ^ v.rotate_left(32) ^ 0x9e37_79b9);
     }
-    [mix(h1), mix(h2 ^ 0x9e37_79b9_7f4a_7c15)]
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        let mut last = [0u8; 8];
+        last[..rem.len()].copy_from_slice(rem);
+        last[rem.len()] = 0x80;
+        let v = u64::from_le_bytes(last);
+        h1 = mix(h1 ^ v);
+        h2 = mix(h2 ^ v ^ 0xdead_beef_cafe_f00d);
+    }
+    h1 = mix(h1 ^ (b.len() as u64));
+    h2 = mix(h2 ^ ((b.len() as u64) << 1 | 1));
+    [h1, h2]
 }
 
 /// Hasher for keys that are already 128-bit hashes.
@@ -209,56 +223,109 @@ fn civil_ms(b: &[u8]) -> i64 {
 /// F3 digits-only epoch millis. Everything else is INVALID_TS.
 #[inline]
 pub fn parse_ts(b: &[u8]) -> i64 {
-    if b.len() == 20
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b[10] == b'T'
-        && b[13] == b':'
-        && b[16] == b':'
-        && b[19] == b'Z'
-    {
-        return civil_ms(b);
-    }
-    if b.len() == 25
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b[10] == b'T'
-        && b[13] == b':'
-        && b[16] == b':'
-        && (b[19] == b'+' || b[19] == b'-')
-        && b[22] == b':'
-    {
-        let base = civil_ms(b);
-        if base == INVALID_TS {
-            return INVALID_TS;
+    match b.len() {
+        20 => {
+            // F1: separators at fixed positions, digits elsewhere
+            if b[4] == b'-'
+                && b[7] == b'-'
+                && b[10] == b'T'
+                && b[13] == b':'
+                && b[16] == b':'
+                && b[19] == b'Z'
+                && b[0].is_ascii_digit()
+                && b[1].is_ascii_digit()
+                && b[2].is_ascii_digit()
+                && b[3].is_ascii_digit()
+                && b[5].is_ascii_digit()
+                && b[6].is_ascii_digit()
+                && b[8].is_ascii_digit()
+                && b[9].is_ascii_digit()
+                && b[11].is_ascii_digit()
+                && b[12].is_ascii_digit()
+                && b[14].is_ascii_digit()
+                && b[15].is_ascii_digit()
+                && b[17].is_ascii_digit()
+                && b[18].is_ascii_digit()
+            {
+                let y = (b[0] - b'0') as i64 * 1000
+                    + (b[1] - b'0') as i64 * 100
+                    + (b[2] - b'0') as i64 * 10
+                    + (b[3] - b'0') as i64;
+                let mo = ((b[5] - b'0') * 10 + (b[6] - b'0')) as i64;
+                let d = ((b[8] - b'0') * 10 + (b[9] - b'0')) as i64;
+                let h = ((b[11] - b'0') * 10 + (b[12] - b'0')) as i64;
+                let mi = ((b[14] - b'0') * 10 + (b[15] - b'0')) as i64;
+                let sec = ((b[17] - b'0') * 10 + (b[18] - b'0')) as i64;
+                if mo < 1 || mo > 12 || d < 1 || d > days_in_month(y, mo) {
+                    return INVALID_TS;
+                }
+                if h > 23 || mi > 59 || sec > 59 {
+                    return INVALID_TS;
+                }
+                return days_from_civil(y, mo, d) * 86_400_000
+                    + h * 3_600_000
+                    + mi * 60_000
+                    + sec * 1_000;
+            }
+            // 20 chars that are all digits: F3
+            if b.iter().all(|&c| c.is_ascii_digit()) {
+                return parse_f3(b);
+            }
+            INVALID_TS
         }
-        let (oh, om) = match (num(&b[20..22]), num(&b[23..25])) {
-            (Some(a), Some(c)) => (a, c),
-            _ => return INVALID_TS,
-        };
-        if oh > 23 || om > 59 {
-            return INVALID_TS;
-        }
-        let off_ms = (oh * 3600 + om * 60) * 1000;
-        if b[19] == b'+' {
-            base - off_ms
-        } else {
-            base + off_ms
-        }
-    } else if !b.is_empty() && b.iter().all(|&c| c.is_ascii_digit()) {
-        // F3: leading zeros fine; too long for i64 means outside the window.
-        let mut v: i64 = 0;
-        for &c in b {
-            let d = (c - b'0') as i64;
-            match v.checked_mul(10).and_then(|x| x.checked_add(d)) {
-                Some(x) => v = x,
-                None => return i64::MAX, // beyond window_end for any real window
+        25 => {
+            if b[4] == b'-'
+                && b[7] == b'-'
+                && b[10] == b'T'
+                && b[13] == b':'
+                && b[16] == b':'
+                && (b[19] == b'+' || b[19] == b'-')
+                && b[22] == b':'
+            {
+                let base = civil_ms(b);
+                if base == INVALID_TS {
+                    return INVALID_TS;
+                }
+                let (oh, om) = match (num(&b[20..22]), num(&b[23..25])) {
+                    (Some(a), Some(c)) => (a, c),
+                    _ => return INVALID_TS,
+                };
+                if oh > 23 || om > 59 {
+                    return INVALID_TS;
+                }
+                let off_ms = (oh * 3600 + om * 60) * 1000;
+                if b[19] == b'+' {
+                    base - off_ms
+                } else {
+                    base + off_ms
+                }
+            } else if !b.is_empty() && b.iter().all(|&c| c.is_ascii_digit()) {
+                parse_f3(b)
+            } else {
+                INVALID_TS
             }
         }
-        v
-    } else {
-        INVALID_TS
+        _ => {
+            if !b.is_empty() && b.iter().all(|&c| c.is_ascii_digit()) {
+                parse_f3(b)
+            } else {
+                INVALID_TS
+            }
+        }
     }
+}
+
+#[inline]
+fn parse_f3(b: &[u8]) -> i64 {
+    let mut v: i64 = 0;
+    for &c in b {
+        let d = (c - b'0') as i64;
+        match v.checked_mul(10).and_then(|x| x.checked_add(d)) {
+            Some(x) => v = x,
+            None => return i64::MAX, // beyond window_end for any real window
+        }
+    }
+    v
 }
 
 /// price_cents: ASCII digits only, value 1..=10,000,000 for purchases.
